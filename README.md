@@ -182,6 +182,28 @@
 
 ---
 
+## Phase 1 Prototype Implementation
+
+The repository now contains a minimal Windows-focused client agent that delivers the Phase 1 goals:
+
+- `src/ProcessEnumerator.cpp` enumerates active processes via the Toolhelp snapshot API, applies a conservative whitelist, and captures executable paths where accessible.
+- `src/Logger.cpp` emits timestamped entries to both standard output and `logs/agent.log`, enabling historical review.
+- `src/main.cpp` orchestrates the scan and classifies each result (`WHITELISTED`, `ACCESS LIMITED`, `REVIEW`).
+- `CMakeLists.txt` defines a C++20 build with strict warnings (`/W4 /WX` on MSVC) and lean Windows headers.
+
+### Building & Running (Windows 10/11)
+1. Open a Developer Command Prompt for VS and run:
+   ```powershell
+   cmake -S . -B build -G "Ninja"
+   cmake --build build --config Release
+   ```
+2. Execute `build/anticheat-client.exe` from an elevated console to maximize access to protected processes.
+3. Review output in the console or inspect `logs/agent.log`.
+
+> **Reminder:** Execute only on systems you control, with explicit consent, and preferably inside an isolated test VM to avoid interfering with legitimate gameplay.
+
+---
+
 ## Best Practices & Warnings
 
 - **Security:**

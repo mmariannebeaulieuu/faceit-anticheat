@@ -29,6 +29,9 @@ CMakeCache.txt
 # Visual Studio Code
 .vscode/
 
+# Runtime logs
+logs/
+
 # OS-specific
 Thumbs.db
 .DS_Store
