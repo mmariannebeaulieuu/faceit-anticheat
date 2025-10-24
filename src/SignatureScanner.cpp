@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace {
-constexpr size_t kMaxModuleReadSize = 16u * 1024u * 1024u; // 16 MiB cap per module
+constexpr size_t kMaxModuleReadSize = 16u * 1024u * 1024u;
 }
 
 SignatureScanner::SignatureScanner() {

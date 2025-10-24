@@ -9,10 +9,12 @@ add_executable(anticheat-client
     src/Logger.cpp
     src/ProcessEnumerator.cpp
     src/SignatureScanner.cpp
+    src/CertificateVerifier.cpp
+    src/KernelInterface.cpp
     src/main.cpp
 )
 
-target_include_directories(anticheat-client PRIVATE include)
+target_include_directories(anticheat-client PRIVATE include shared)
 
 target_compile_definitions(anticheat-client PRIVATE
     UNICODE
@@ -29,3 +31,8 @@ target_compile_options(anticheat-client PRIVATE
 if (MSVC)
     target_link_options(anticheat-client PRIVATE /SUBSYSTEM:CONSOLE)
 endif()
+
+target_link_libraries(anticheat-client PRIVATE
+    Wintrust
+    Crypt32
+)

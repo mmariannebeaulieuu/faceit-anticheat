@@ -1,3 +1,5 @@
+#include "CertificateVerifier.hpp"
+#include "KernelInterface.hpp"
 #include "Logger.hpp"
 #include "ProcessEnumerator.hpp"
 #include "SignatureScanner.hpp"
@@ -6,8 +8,19 @@
 #include <sstream>
 
 int wmain() {
-    Logger::instance().info(L"CS:GO Anti-Cheat Prototype - Phase 2 initialization");
+    Logger::instance().info(L"CS:GO Anti-Cheat Prototype - Phase 3 initialization");
 
+    KernelInterface kernel;
+    if (kernel.connect()) {
+        if (const auto version = kernel.queryVersion()) {
+            std::wstringstream versionMsg;
+            versionMsg << L"Kernel monitor ready version "
+                       << version->major << L'.' << version->minor;
+            Logger::instance().info(versionMsg.str());
+        }
+    }
+
+    CertificateVerifier certificateVerifier;
     ProcessEnumerator enumerator;
     SignatureScanner scanner;
     const auto processes = enumerator.enumerate();
@@ -31,6 +44,25 @@ int wmain() {
             builder << L" [REVIEW]";
         }
         Logger::instance().warn(builder.str());
+
+        if (process.accessible && !process.imagePath.empty()) {
+            const auto verification = certificateVerifier.verifyImage(process.imagePath);
+            std::wstringstream certMsg;
+            certMsg << L"Certificate PID=" << process.pid << L" status=0x"
+                    << std::hex << std::uppercase << std::setw(8) << std::setfill(L'0')
+                    << static_cast<unsigned long>(verification.statusCode);
+            if (!verification.subjectName.empty()) {
+                certMsg << L" subject=" << verification.subjectName;
+            }
+            if (verification.trusted && verification.publisherAllowed) {
+                Logger::instance().info(certMsg.str());
+            } else if (verification.trusted) {
+                certMsg << L" [UNAPPROVED PUBLISHER]";
+                Logger::instance().warn(certMsg.str());
+            } else {
+                Logger::instance().error(certMsg.str());
+            }
+        }
 
         const auto hits = scanner.scan(process);
         if (hits.empty()) {
