@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(anticheat-client
     src/Logger.cpp
     src/ProcessEnumerator.cpp
+    src/SignatureScanner.cpp
     src/main.cpp
 )
 

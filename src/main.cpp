@@ -1,12 +1,15 @@
 #include "Logger.hpp"
 #include "ProcessEnumerator.hpp"
+#include "SignatureScanner.hpp"
 
+#include <iomanip>
 #include <sstream>
 
 int wmain() {
-    Logger::instance().info(L"CS:GO Anti-Cheat Prototype - Phase 1 initialization");
+    Logger::instance().info(L"CS:GO Anti-Cheat Prototype - Phase 2 initialization");
 
     ProcessEnumerator enumerator;
+    SignatureScanner scanner;
     const auto processes = enumerator.enumerate();
 
     for (const auto& process : processes) {
@@ -19,12 +22,33 @@ int wmain() {
         if (process.isWhitelisted) {
             builder << L" [WHITELISTED]";
             Logger::instance().info(builder.str());
-        } else if (!process.accessible) {
+            continue;
+        }
+
+        if (!process.accessible) {
             builder << L" [ACCESS LIMITED]";
-            Logger::instance().warn(builder.str());
         } else {
             builder << L" [REVIEW]";
-            Logger::instance().warn(builder.str());
+        }
+        Logger::instance().warn(builder.str());
+
+        const auto hits = scanner.scan(process);
+        if (hits.empty()) {
+            std::wstringstream noHitMsg;
+            noHitMsg << L"No signature hits for PID=" << process.pid << L" (" << process.name << L")";
+            Logger::instance().info(noHitMsg.str());
+            continue;
+        }
+
+        for (const auto& hit : hits) {
+            std::wstringstream hitMsg;
+            hitMsg << L"Signature ['" << hit.signatureName << L"'] detected in module "
+                   << hit.moduleName << L" at 0x"
+                   << std::hex << std::uppercase
+                   << std::setw(sizeof(uintptr_t) * 2)
+                   << std::setfill(L'0')
+                   << hit.address;
+            Logger::instance().error(hitMsg.str());
         }
     }
 
