@@ -1,0 +1,34 @@
+# Build artifacts
+/build/
+/bin/
+/obj/
+/out/
+/x64/
+/x86/
+/CMakeFiles/
+CMakeCache.txt
+*.sln
+*.vcxproj*
+*.user
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.obj
+*.log
+*.tmp
+*.pch
+*.exp
+*.ipch
+*.tlog
+*.lastbuildstate
+*.VC.db
+*.VC.VC.opendb
+
+# Visual Studio Code
+.vscode/
+
+# OS-specific
+Thumbs.db
+.DS_Store
