@@ -72,7 +72,9 @@ std::vector<ProcessInfo> ProcessEnumerator::enumerate() const {
             wchar_t buffer[MAX_PATH] = {0};
             DWORD size = static_cast<DWORD>(std::size(buffer));
             if (QueryFullProcessImageNameW(processHandle, 0, buffer, &size) != 0) {
-                info.imagePath.assign(buffer, buffer + size);
+                if (size > 0) {
+                    info.imagePath.assign(buffer, buffer + (size - 1));
+                }
             }
             info.accessible = true;
             CloseHandle(processHandle);

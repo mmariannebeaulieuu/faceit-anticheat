@@ -106,7 +106,7 @@ std::string Logger::toUtf8(std::wstring_view message) {
     if (required <= 0) {
         return {};
     }
-    std::string buffer(required, '\0');
+    std::string buffer(static_cast<size_t>(required), '\0');
     int written = WideCharToMultiByte(
         CP_UTF8,
         0,
@@ -119,6 +119,7 @@ std::string Logger::toUtf8(std::wstring_view message) {
     if (written <= 0) {
         return {};
     }
+    buffer.resize(static_cast<size_t>(written));
     return buffer;
 #else
     std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
