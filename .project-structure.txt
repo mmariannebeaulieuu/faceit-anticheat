@@ -1,0 +1,95 @@
+CS:GO Anti-Cheat Prototype - Project Structure
+===============================================
+
+ROOT/
+│
+├── Core Application (C++)
+│   ├── src/                           # C++ source files
+│   │   ├── main.cpp                  # Entry point
+│   │   ├── Logger.cpp                # Logging system
+│   │   ├── ProcessEnumerator.cpp     # Process scanning
+│   │   ├── SignatureScanner.cpp      # Memory signature detection
+│   │   ├── CertificateVerifier.cpp   # Digital signature checks
+│   │   └── KernelInterface.cpp       # Kernel driver communication
+│   │
+│   ├── include/                       # C++ headers
+│   │   ├── Logger.hpp
+│   │   ├── ProcessEnumerator.hpp
+│   │   ├── SignatureScanner.hpp
+│   │   ├── CertificateVerifier.hpp
+│   │   └── KernelInterface.hpp
+│   │
+│   ├── kernel/                        # Kernel driver (optional)
+│   │   ├── AntiCheatKernelDriver.c   # Driver implementation
+│   │   └── AntiCheatKernelDriver.inf # Driver installation
+│   │
+│   ├── shared/                        # Shared definitions
+│   │   └── KernelProtocol.h          # User/kernel protocol
+│   │
+│   └── CMakeLists.txt                 # Build configuration
+│
+├── Launcher System (Python → EXE)
+│   ├── launcher.py                    # Main launcher (Python)
+│   ├── build_launcher.py              # Creates launcher.exe
+│   ├── release-config.json            # Download configuration
+│   └── requirements.txt               # Python dependencies
+│
+├── Build Scripts
+│   ├── build_all.bat                  # Windows batch build
+│   ├── build_all.ps1                  # PowerShell build
+│   ├── build_launcher.sh              # Linux/WSL build
+│   ├── run.bat                        # Quick run
+│   └── quick_start.bat                # Build & run combo
+│
+├── Documentation
+│   ├── README.md                      # Main documentation
+│   ├── USAGE.md                       # Quick reference
+│   └── IMPLEMENTATION_SUMMARY.md      # This implementation
+│
+├── Configuration
+│   ├── .gitignore                     # Git ignore rules
+│   └── .gitattributes                 # Line ending rules
+│
+└── Generated (not in git)
+    ├── build/                         # CMake build output
+    │   └── Release/
+    │       └── anticheat-client.exe   # Built C++ application
+    │
+    ├── dist/                          # PyInstaller output
+    │   └── AntiCheatLauncher.exe      # Standalone launcher
+    │
+    └── anticheat_files/               # Runtime directory
+        ├── anticheat-client.exe       # Main executable
+        └── release-config.json        # Runtime config
+
+DISTRIBUTION OPTIONS
+====================
+
+Option 1: Local (No Downloads)
+   Distribute:
+   - AntiCheatLauncher.exe
+   - anticheat_files/anticheat-client.exe
+   - release-config.json (URLs empty)
+
+Option 2: Remote (With Downloads)
+   Host on server:
+   - anticheat-client.exe
+   - AntiCheatKernelDriver.sys (optional)
+   
+   Distribute:
+   - AntiCheatLauncher.exe
+   - release-config.json (with URLs)
+
+WORKFLOW
+========
+
+Development:
+1. Edit C++ code in src/
+2. Run: build_all.ps1
+3. Run: AntiCheatLauncher.exe
+
+Deployment:
+1. Build: build_all.ps1
+2. Upload files to server (optional)
+3. Update release-config.json
+4. Distribute: AntiCheatLauncher.exe + config

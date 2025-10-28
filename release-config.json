@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0",
+  "description": "CS:GO Anti-Cheat Prototype Release Configuration",
+  "notes": [
+    "Configure this file to enable automatic downloads",
+    "Leave URLs empty to use local files only",
+    "Checksums are optional but recommended for production",
+    "The launcher will automatically detect local builds"
+  ],
+  "files": [
+    {
+      "name": "anticheat-client.exe",
+      "url": "",
+      "required": true,
+      "checksum": "",
+      "description": "Main anti-cheat client executable"
+    },
+    {
+      "name": "AntiCheatKernelDriver.sys",
+      "url": "",
+      "required": false,
+      "checksum": "",
+      "description": "Kernel-mode driver for advanced monitoring (optional)"
+    }
+  ],
+  "deployment": {
+    "github_example": {
+      "url_pattern": "https://github.com/USERNAME/REPO/releases/download/VERSION/FILENAME",
+      "note": "Replace USERNAME, REPO, VERSION with your values"
+    },
+    "custom_server_example": {
+      "url_pattern": "https://yourserver.com/downloads/FILENAME",
+      "note": "Use any HTTP/HTTPS server"
+    }
+  }
+}

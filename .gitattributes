@@ -1,0 +1,30 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Windows scripts should use CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Unix scripts should use LF
+*.sh text eol=lf
+
+# Python files use LF
+*.py text eol=lf
+
+# Explicitly declare text files
+*.cpp text
+*.hpp text
+*.c text
+*.h text
+*.cmake text
+*.txt text
+*.md text
+*.json text
+
+# Denote all files that are truly binary and should not be modified
+*.exe binary
+*.dll binary
+*.sys binary
+*.lib binary
+*.obj binary
+*.pdb binary
