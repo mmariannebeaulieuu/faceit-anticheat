@@ -1,0 +1,386 @@
+name: Performance Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+jobs:
+  build-performance:
+    name: Build Performance Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Clean Build Timing
+      run: |
+        Write-Host "=== Clean Build Performance ==="
+        
+        $iterations = 3
+        $times = @()
+        
+        for ($i = 1; $i -le $iterations; $i++) {
+          Write-Host "`nBuild iteration $i of $iterations"
+          
+          if (Test-Path "build") {
+            Remove-Item -Recurse -Force "build"
+          }
+          
+          $start = Get-Date
+          
+          cmake -B build -G "Visual Studio 17 2022" -A x64 2>&1 | Out-Null
+          cmake --build build --config Release 2>&1 | Out-Null
+          
+          $end = Get-Date
+          $duration = ($end - $start).TotalSeconds
+          $times += $duration
+          
+          Write-Host "Duration: $duration seconds"
+        }
+        
+        $avg = ($times | Measure-Object -Average).Average
+        $min = ($times | Measure-Object -Minimum).Minimum
+        $max = ($times | Measure-Object -Maximum).Maximum
+        
+        Write-Host "`n=== Build Performance Summary ==="
+        Write-Host "Average: $([math]::Round($avg, 2)) seconds"
+        Write-Host "Minimum: $([math]::Round($min, 2)) seconds"
+        Write-Host "Maximum: $([math]::Round($max, 2)) seconds"
+        
+        if ($avg -gt 120) {
+          Write-Host "⚠ Build time exceeds 2 minutes"
+        } else {
+          Write-Host "✓ Build time acceptable"
+        }
+      shell: pwsh
+
+  incremental-build-performance:
+    name: Incremental Build Performance
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Initial Build
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Incremental Build Timing
+      run: |
+        Write-Host "=== Incremental Build Performance ==="
+        
+        $testFile = "src/Logger.cpp"
+        
+        if (Test-Path $testFile) {
+          Add-Content -Path $testFile -Value "`n// Performance test comment"
+          
+          $start = Get-Date
+          cmake --build build --config Release 2>&1 | Out-Null
+          $end = Get-Date
+          
+          $duration = ($end - $start).TotalSeconds
+          
+          Write-Host "Incremental build time: $([math]::Round($duration, 2)) seconds"
+          
+          if ($duration -gt 30) {
+            Write-Host "⚠ Incremental build time exceeds 30 seconds"
+          } else {
+            Write-Host "✓ Incremental build time acceptable"
+          }
+          
+          git checkout $testFile
+        }
+      shell: pwsh
+
+  binary-analysis:
+    name: Binary Performance Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build with Different Configurations
+      run: |
+        Write-Host "=== Binary Configuration Analysis ==="
+        
+        $configs = @(
+          @{Name="Release"; Flags=""},
+          @{Name="Release-O2"; Flags="/O2"},
+          @{Name="Release-Optimized"; Flags="/O2 /Oi /Ot /GL"}
+        )
+        
+        $results = @()
+        
+        foreach ($config in $configs) {
+          Write-Host "`nBuilding: $($config.Name)"
+          
+          if (Test-Path "build") {
+            Remove-Item -Recurse -Force "build"
+          }
+          
+          $flags = $config.Flags
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_FLAGS="$flags"
+          cmake --build build --config Release 2>&1 | Out-Null
+          
+          if (Test-Path "build\Release\anticheat-client.exe") {
+            $size = (Get-Item "build\Release\anticheat-client.exe").Length
+            $sizeMB = [math]::Round($size / 1MB, 2)
+            
+            $results += [PSCustomObject]@{
+              Configuration = $config.Name
+              SizeMB = $sizeMB
+              SizeBytes = $size
+            }
+          }
+        }
+        
+        Write-Host "`n=== Binary Size Comparison ==="
+        $results | Format-Table -AutoSize
+        
+        $smallest = ($results | Sort-Object SizeBytes | Select-Object -First 1).Configuration
+        Write-Host "Smallest binary: $smallest"
+      shell: pwsh
+
+  startup-performance:
+    name: Startup Performance Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Measure Startup Time
+      run: |
+        Write-Host "=== Startup Performance Analysis ==="
+        
+        $exe = "build\Release\anticheat-client.exe"
+        
+        if (Test-Path $exe) {
+          Write-Host "Measuring startup time (process creation to exit)..."
+          
+          $iterations = 5
+          $times = @()
+          
+          for ($i = 1; $i -le $iterations; $i++) {
+            $start = Get-Date
+            $process = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+            Start-Sleep -Milliseconds 100
+            
+            if (!$process.HasExited) {
+              $process.Kill()
+              $process.WaitForExit()
+            }
+            
+            $end = Get-Date
+            $duration = ($end - $start).TotalMilliseconds
+            $times += $duration
+          }
+          
+          $avg = ($times | Measure-Object -Average).Average
+          Write-Host "Average startup time: $([math]::Round($avg, 2)) ms"
+          
+          if ($avg -gt 1000) {
+            Write-Host "⚠ Startup time exceeds 1 second"
+          } else {
+            Write-Host "✓ Startup time acceptable"
+          }
+        } else {
+          Write-Host "⚠ Executable not found"
+        }
+      shell: pwsh
+      continue-on-error: true
+
+  memory-footprint:
+    name: Memory Footprint Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Analyze Memory Usage
+      run: |
+        Write-Host "=== Memory Footprint Analysis ==="
+        
+        $exe = "build\Release\anticheat-client.exe"
+        
+        if (Test-Path $exe) {
+          Write-Host "Starting process to measure memory..."
+          
+          $process = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 2
+          
+          if (!$process.HasExited) {
+            $process.Refresh()
+            $workingSetMB = [math]::Round($process.WorkingSet64 / 1MB, 2)
+            $privateMemMB = [math]::Round($process.PrivateMemorySize64 / 1MB, 2)
+            
+            Write-Host "Working Set: $workingSetMB MB"
+            Write-Host "Private Memory: $privateMemMB MB"
+            
+            if ($workingSetMB -gt 100) {
+              Write-Host "⚠ High memory usage detected"
+            } else {
+              Write-Host "✓ Memory usage acceptable"
+            }
+            
+            $process.Kill()
+            $process.WaitForExit()
+          } else {
+            Write-Host "Process exited immediately"
+          }
+        }
+      shell: pwsh
+      continue-on-error: true
+
+  code-complexity-performance:
+    name: Code Complexity Impact
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Lizard
+      run: pip install lizard
+      
+    - name: Complexity Analysis
+      run: |
+        echo "=== Code Complexity Performance Impact ==="
+        
+        lizard src kernel -l cpp --csv > complexity.csv
+        
+        echo ""
+        echo "High complexity functions (CCN > 15):"
+        lizard src kernel -l cpp -C 15 || true
+        
+        echo ""
+        echo "⚠ High complexity can impact:"
+        echo "  • Compilation time"
+        echo "  • Optimization effectiveness"
+        echo "  • Maintenance cost"
+        echo "  • Testing coverage"
+        
+    - name: Upload Complexity Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: complexity-report
+        path: complexity.csv
+        retention-days: 30
+
+  link-time-optimization:
+    name: Link-Time Optimization Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build Without LTO
+      run: |
+        Write-Host "Building without LTO..."
+        cmake -B build-no-lto -G "Visual Studio 17 2022" -A x64
+        
+        $start = Get-Date
+        cmake --build build-no-lto --config Release 2>&1 | Out-Null
+        $end = Get-Date
+        
+        $durationNoLTO = ($end - $start).TotalSeconds
+        $sizeNoLTO = (Get-Item "build-no-lto\Release\anticheat-client.exe").Length
+        
+        Write-Host "No LTO - Build time: $([math]::Round($durationNoLTO, 2))s, Size: $([math]::Round($sizeNoLTO/1MB, 2))MB"
+      shell: pwsh
+      
+    - name: Build With LTO
+      run: |
+        Write-Host "Building with LTO..."
+        cmake -B build-lto -G "Visual Studio 17 2022" -A x64 -DCMAKE_CXX_FLAGS="/GL" -DCMAKE_EXE_LINKER_FLAGS="/LTCG"
+        
+        $start = Get-Date
+        cmake --build build-lto --config Release 2>&1 | Out-Null
+        $end = Get-Date
+        
+        $durationLTO = ($end - $start).TotalSeconds
+        $sizeLTO = (Get-Item "build-lto\Release\anticheat-client.exe").Length
+        
+        Write-Host "With LTO - Build time: $([math]::Round($durationLTO, 2))s, Size: $([math]::Round($sizeLTO/1MB, 2))MB"
+        
+        Write-Host "`n=== LTO Impact ==="
+        $timeDiff = $durationLTO - $durationNoLTO
+        $sizeDiff = $sizeLTO - $sizeNoLTO
+        
+        Write-Host "Build time difference: $([math]::Round($timeDiff, 2))s"
+        Write-Host "Size difference: $([math]::Round($sizeDiff/1KB, 2))KB"
+      shell: pwsh
+      continue-on-error: true
+
+  compile-time-headers:
+    name: Header Inclusion Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Analyze Include Patterns
+      run: |
+        echo "=== Header Inclusion Analysis ==="
+        
+        echo "Most included headers:"
+        find src include -name "*.cpp" -o -name "*.h" -o -name "*.hpp" | \
+          xargs grep "^#include" | \
+          sed 's/.*#include//' | \
+          sort | uniq -c | sort -rn | head -20
+        
+        echo ""
+        echo "Files with most includes:"
+        for file in src/*.cpp; do
+          if [ -f "$file" ]; then
+            count=$(grep -c "^#include" "$file")
+            echo "$(basename $file): $count includes"
+          fi
+        done | sort -t: -k2 -rn
+        
+        echo ""
+        echo "⚠ Excessive includes can slow compilation"
+        echo "Consider:"
+        echo "  • Forward declarations"
+        echo "  • Precompiled headers"
+        echo "  • Include what you use"

@@ -1,0 +1,161 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+  CMAKE_VERSION: 3.20.0
+
+jobs:
+  build-client:
+    name: Build Anti-Cheat Client
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.20.x'
+        
+    - name: Configure CMake
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+      
+    - name: Build
+      run: cmake --build build --config ${{ env.BUILD_TYPE }} --verbose
+      
+    - name: Verify Build Output
+      run: |
+        if (Test-Path "build\Release\anticheat-client.exe") {
+          Write-Host "✓ Build successful: anticheat-client.exe created"
+          Get-Item "build\Release\anticheat-client.exe" | Select-Object Name, Length, LastWriteTime
+        } else {
+          Write-Host "✗ Build failed: anticheat-client.exe not found"
+          exit 1
+        }
+      shell: pwsh
+      
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: anticheat-client-windows-x64
+        path: build/Release/anticheat-client.exe
+        retention-days: 30
+        
+  build-with-sanitizers:
+    name: Build with Memory Sanitizers
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        sanitizer: [address]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.20.x'
+        
+    - name: Configure CMake with Sanitizers
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_BUILD_TYPE=Debug `
+          -DCMAKE_CXX_FLAGS="/fsanitize=${{ matrix.sanitizer }}"
+      
+    - name: Build with Sanitizer
+      run: cmake --build build --config Debug
+      continue-on-error: true
+      
+    - name: Report Sanitizer Build Status
+      run: |
+        if (Test-Path "build\Debug\anticheat-client.exe") {
+          Write-Host "✓ ${{ matrix.sanitizer }} sanitizer build successful"
+        } else {
+          Write-Host "⚠ ${{ matrix.sanitizer }} sanitizer build needs attention"
+        }
+      shell: pwsh
+
+  build-launcher:
+    name: Build Python Launcher
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Build Launcher Executable
+      run: python build_launcher.py
+      
+    - name: Verify Launcher Build
+      run: |
+        if (Test-Path "dist\AntiCheatLauncher.exe") {
+          Write-Host "✓ Launcher build successful"
+          Get-Item "dist\AntiCheatLauncher.exe" | Select-Object Name, Length
+        } else {
+          Write-Host "✗ Launcher build failed"
+          exit 1
+        }
+      shell: pwsh
+      
+    - name: Upload Launcher Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: anticheat-launcher-windows
+        path: dist/AntiCheatLauncher.exe
+        retention-days: 30
+
+  static-analysis:
+    name: Static Code Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Run MSVC Code Analysis
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_CXX_FLAGS="/analyze /W4"
+        cmake --build build --config Release 2>&1 | Tee-Object -FilePath analysis.log
+      continue-on-error: true
+      shell: pwsh
+      
+    - name: Upload Analysis Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: static-analysis-results
+        path: analysis.log
+        retention-days: 14

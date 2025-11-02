@@ -1,0 +1,432 @@
+name: Kernel Driver Analysis
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'kernel/**'
+      - 'shared/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'kernel/**'
+      - 'shared/**'
+  workflow_dispatch:
+
+jobs:
+  kernel-static-analysis:
+    name: Kernel Static Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Analysis Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cppcheck clang-tidy sparse
+        
+    - name: Run Cppcheck on Kernel Code
+      run: |
+        echo "=== Running Cppcheck on Kernel Driver ==="
+        cppcheck --enable=all --inconclusive --std=c11 \
+          --suppress=missingIncludeSystem \
+          -I shared \
+          kernel/ 2>&1 | tee cppcheck-kernel.log
+      continue-on-error: true
+      
+    - name: Analyze Results
+      run: |
+        if [ -s cppcheck-kernel.log ]; then
+          echo "⚠ Cppcheck found issues:"
+          cat cppcheck-kernel.log
+        else
+          echo "✓ No issues found by Cppcheck"
+        fi
+      
+    - name: Upload Analysis Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: kernel-cppcheck-results
+        path: cppcheck-kernel.log
+        retention-days: 30
+
+  kernel-security-patterns:
+    name: Kernel Security Pattern Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check Pool Allocation Patterns
+      run: |
+        echo "=== Pool Allocation Security ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for untagged pool allocations..."
+        if grep -n "ExAllocatePool[^W]" "$driver"; then
+          echo "⚠ Found untagged ExAllocatePool - use ExAllocatePoolWithTag"
+        else
+          echo "✓ No untagged pool allocations"
+        fi
+        
+        echo ""
+        echo "Checking for pool tag definitions..."
+        if grep -q "TAG\|tag.*=" "$driver"; then
+          echo "✓ Pool tags defined"
+        else
+          echo "⚠ No pool tags found - define unique tags for debugging"
+        fi
+        
+    - name: Check Buffer Validation
+      run: |
+        echo "=== Buffer Validation Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for input validation..."
+        
+        checks=(
+          "ProbeForRead:User buffer read validation"
+          "ProbeForWrite:User buffer write validation"
+          "BufferLength:Buffer size checking"
+          "STATUS_BUFFER_TOO_SMALL:Buffer overflow protection"
+          "InputBufferLength:Input size validation"
+          "OutputBufferLength:Output size validation"
+        )
+        
+        for check_pair in "${checks[@]}"; do
+          pattern="${check_pair%%:*}"
+          desc="${check_pair##*:}"
+          
+          if grep -q "$pattern" "$driver"; then
+            echo "✓ $desc: Present"
+          else
+            echo "⚠ $desc: Missing"
+          fi
+        done
+        
+    - name: Check Exception Handling
+      run: |
+        echo "=== Exception Handling Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for structured exception handling..."
+        
+        if grep -q "__try" "$driver"; then
+          echo "✓ Exception handling present"
+          
+          if grep -q "__except" "$driver"; then
+            echo "✓ Exception handlers present"
+          else
+            echo "⚠ __try without __except found"
+          fi
+        else
+          echo "⚠ No structured exception handling"
+          echo "  Add __try/__except for user-mode buffer access"
+        fi
+        
+    - name: Check IRQL Compliance
+      run: |
+        echo "=== IRQL Compliance Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for IRQL-unsafe operations..."
+        
+        unsafe_at_high_irql=(
+          "ExAllocatePool[^W].*PagedPool"
+          "KeWaitForSingleObject"
+          "KeDelayExecutionThread"
+          "ObReferenceObjectByHandle"
+        )
+        
+        for pattern in "${unsafe_at_high_irql[@]}"; do
+          if grep -q "$pattern" "$driver"; then
+            echo "⚠ Found IRQL-unsafe operation: $pattern"
+            echo "  Ensure IRQL <= APC_LEVEL"
+          fi
+        done
+        
+        echo ""
+        echo "Checking for IRQL annotations..."
+        if grep -q "PAGED_CODE\|IRQL" "$driver"; then
+          echo "✓ IRQL annotations present"
+        else
+          echo "⚠ Consider adding PAGED_CODE() assertions"
+        fi
+
+  kernel-memory-safety:
+    name: Kernel Memory Safety
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check Memory Management
+      run: |
+        echo "=== Kernel Memory Management Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Analyzing allocation/deallocation pairs..."
+        
+        alloc_count=$(grep -c "ExAllocatePool" "$driver" || true)
+        free_count=$(grep -c "ExFreePool" "$driver" || true)
+        
+        echo "Pool allocations: $alloc_count"
+        echo "Pool deallocations: $free_count"
+        
+        if [ $alloc_count -ne $free_count ] && [ $alloc_count -gt 0 ]; then
+          echo "⚠ Mismatch between allocations and frees"
+          echo "  Check for memory leaks"
+        elif [ $alloc_count -eq $free_count ] && [ $alloc_count -gt 0 ]; then
+          echo "✓ Allocation/deallocation pairs match"
+        fi
+        
+        echo ""
+        echo "Checking for proper cleanup in unload..."
+        if grep -A 20 "DriverUnload\|Unload" "$driver" | grep -q "ExFreePool\|IoDeleteDevice"; then
+          echo "✓ Cleanup in driver unload"
+        else
+          echo "⚠ Verify proper cleanup in driver unload"
+        fi
+        
+    - name: Check for Race Conditions
+      run: |
+        echo "=== Race Condition Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for synchronization primitives..."
+        
+        sync_mechanisms=(
+          "ERESOURCE"
+          "FAST_MUTEX"
+          "KSPIN_LOCK"
+          "ExAcquireResourceExclusiveLite"
+          "KeAcquireSpinLock"
+          "KeWaitForSingleObject"
+        )
+        
+        found_sync=false
+        for mechanism in "${sync_mechanisms[@]}"; do
+          if grep -q "$mechanism" "$driver"; then
+            echo "✓ Found synchronization: $mechanism"
+            found_sync=true
+          fi
+        done
+        
+        if [ "$found_sync" = false ]; then
+          echo "⚠ No synchronization primitives found"
+          echo "  Review for race conditions if accessing shared state"
+        fi
+        
+    - name: Check Integer Overflow
+      run: |
+        echo "=== Integer Overflow Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for size calculations..."
+        
+        if grep -n "BufferLength.*+" "$driver"; then
+          echo "⚠ Buffer size arithmetic detected:"
+          grep -n "BufferLength.*+" "$driver"
+          echo "  Verify overflow protection"
+        fi
+        
+        if grep -n "sizeof.*\*" "$driver"; then
+          echo "⚠ Size multiplication detected:"
+          grep -n "sizeof.*\*" "$driver"
+          echo "  Verify overflow protection"
+        fi
+
+  kernel-code-quality:
+    name: Kernel Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check Coding Standards
+      run: |
+        echo "=== Kernel Coding Standards Check ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Checking for SAL annotations..."
+        sal_annotations=(
+          "_In_"
+          "_Out_"
+          "_Inout_"
+          "_In_opt_"
+          "_Out_opt_"
+        )
+        
+        found_sal=false
+        for annotation in "${sal_annotations[@]}"; do
+          if grep -q "$annotation" "$driver"; then
+            echo "✓ Found SAL annotation: $annotation"
+            found_sal=true
+          fi
+        done
+        
+        if [ "$found_sal" = false ]; then
+          echo "⚠ No SAL annotations found"
+          echo "  Consider adding for better code analysis"
+        fi
+        
+        echo ""
+        echo "Checking for proper error handling..."
+        
+        if grep -q "NT_SUCCESS\|STATUS_SUCCESS" "$driver"; then
+          echo "✓ Using NT status codes"
+        else
+          echo "⚠ Check for proper NT status code usage"
+        fi
+        
+        echo ""
+        echo "Checking for unreferenced parameters..."
+        if grep -q "UNREFERENCED_PARAMETER" "$driver"; then
+          echo "✓ Unreferenced parameters marked"
+        else
+          echo "⚠ Consider marking unreferenced parameters"
+        fi
+
+  kernel-documentation:
+    name: Kernel Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check Documentation
+      run: |
+        echo "=== Kernel Driver Documentation Check ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        inf="kernel/AntiCheatKernelDriver.inf"
+        
+        echo "Checking for function documentation..."
+        function_count=$(grep -c "^static.*NTSTATUS\|^NTSTATUS\|^static.*VOID\|^VOID" "$driver" || true)
+        echo "Functions found: $function_count"
+        
+        comment_count=$(grep -c "^/\*\|^//" "$driver" || true)
+        echo "Comment lines: $comment_count"
+        
+        if [ $function_count -gt 0 ] && [ $comment_count -lt $function_count ]; then
+          echo "⚠ Consider adding more documentation"
+        else
+          echo "✓ Documentation appears adequate"
+        fi
+        
+        echo ""
+        echo "Checking INF file..."
+        if [ -f "$inf" ]; then
+          echo "✓ INF file present"
+          
+          required_sections=(
+            "Version"
+            "DestinationDirs"
+            "SourceDisksFiles"
+            "DefaultInstall"
+            "ServiceInstall"
+          )
+          
+          for section in "${required_sections[@]}"; do
+            if grep -q "\[$section\]" "$inf"; then
+              echo "  ✓ Section present: $section"
+            else
+              echo "  ⚠ Section missing: $section"
+            fi
+          done
+        else
+          echo "⚠ INF file not found"
+        fi
+
+  kernel-attack-surface:
+    name: Kernel Attack Surface Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Analyze IOCTL Interface
+      run: |
+        echo "=== IOCTL Interface Security Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        protocol="shared/KernelProtocol.h"
+        
+        echo "Analyzing IOCTL handlers..."
+        
+        if grep -q "IRP_MJ_DEVICE_CONTROL" "$driver"; then
+          echo "✓ Device control handler present"
+          
+          echo ""
+          echo "Checking for IOCTL validation..."
+          
+          if grep -q "IoControlCode" "$driver"; then
+            echo "✓ IOCTL code checking present"
+          else
+            echo "⚠ Add IOCTL code validation"
+          fi
+          
+          if grep -q "InputBufferLength\|OutputBufferLength" "$driver"; then
+            echo "✓ Buffer size validation present"
+          else
+            echo "⚠ Add buffer size validation"
+          fi
+        fi
+        
+        echo ""
+        echo "Checking IOCTL definitions..."
+        if [ -f "$protocol" ]; then
+          ioctl_count=$(grep -c "IOCTL_" "$protocol" || true)
+          echo "IOCTLs defined: $ioctl_count"
+          
+          if [ $ioctl_count -gt 10 ]; then
+            echo "⚠ Large IOCTL interface - review attack surface"
+          else
+            echo "✓ Reasonable IOCTL count"
+          fi
+        fi
+        
+    - name: Check Exposed Functionality
+      run: |
+        echo "=== Exposed Functionality Analysis ==="
+        
+        driver="kernel/AntiCheatKernelDriver.c"
+        
+        echo "Analyzing major function handlers..."
+        
+        major_functions=(
+          "IRP_MJ_CREATE:Device open"
+          "IRP_MJ_CLOSE:Device close"
+          "IRP_MJ_READ:Read operations"
+          "IRP_MJ_WRITE:Write operations"
+          "IRP_MJ_DEVICE_CONTROL:IOCTL handler"
+        )
+        
+        for func_pair in "${major_functions[@]}"; do
+          func="${func_pair%%:*}"
+          desc="${func_pair##*:}"
+          
+          if grep -q "$func" "$driver"; then
+            echo "• $desc: Exposed"
+          fi
+        done
+        
+        echo ""
+        echo "⚠ Each exposed interface increases attack surface"
+        echo "  Only expose necessary functionality"

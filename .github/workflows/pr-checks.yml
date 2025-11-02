@@ -1,0 +1,310 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-validation:
+    name: PR Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Check PR Title
+      run: |
+        PR_TITLE="${{ github.event.pull_request.title }}"
+        
+        echo "PR Title: $PR_TITLE"
+        
+        valid_prefixes=(
+          "feat:"
+          "fix:"
+          "docs:"
+          "refactor:"
+          "test:"
+          "chore:"
+          "security:"
+          "perf:"
+        )
+        
+        valid=false
+        for prefix in "${valid_prefixes[@]}"; do
+          if [[ "$PR_TITLE" == "$prefix"* ]]; then
+            valid=true
+            break
+          fi
+        done
+        
+        if [ "$valid" = false ]; then
+          echo "⚠ PR title should start with one of: ${valid_prefixes[*]}"
+          echo "Example: 'feat: add new anti-cheat detection method'"
+          exit 1
+        else
+          echo "✓ PR title follows convention"
+        fi
+        
+    - name: Check for Breaking Changes
+      run: |
+        echo "Checking for breaking changes..."
+        
+        breaking_patterns=(
+          "BREAKING CHANGE"
+          "breaking:"
+          "!:"
+        )
+        
+        pr_body="${{ github.event.pull_request.body }}"
+        pr_title="${{ github.event.pull_request.title }}"
+        
+        for pattern in "${breaking_patterns[@]}"; do
+          if [[ "$pr_body" == *"$pattern"* ]] || [[ "$pr_title" == *"$pattern"* ]]; then
+            echo "⚠ Breaking change detected: $pattern"
+            echo "Ensure this is properly documented and reviewed"
+          fi
+        done
+        
+    - name: Check Modified Files
+      run: |
+        echo "Analyzing modified files..."
+        
+        git diff --name-only origin/${{ github.base_ref }}...HEAD | while read file; do
+          case "$file" in
+            kernel/*)
+              echo "⚠ Kernel driver modified: $file"
+              echo "  → Extra scrutiny required for kernel changes"
+              ;;
+            src/*)
+              echo "✓ User-mode client modified: $file"
+              ;;
+            .github/workflows/*)
+              echo "⚠ CI/CD workflow modified: $file"
+              ;;
+            *)
+              echo "• Modified: $file"
+              ;;
+          esac
+        done
+
+  size-check:
+    name: Binary Size Check
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Check Binary Size
+      run: |
+        if (Test-Path "build\Release\anticheat-client.exe") {
+          $size = (Get-Item "build\Release\anticheat-client.exe").Length
+          $sizeMB = [math]::Round($size / 1MB, 2)
+          
+          Write-Host "Binary size: $sizeMB MB"
+          
+          if ($size -gt 10MB) {
+            Write-Host "⚠ Warning: Binary size exceeds 10MB"
+            Write-Host "Consider reducing binary size"
+          } else {
+            Write-Host "✓ Binary size acceptable"
+          }
+        }
+      shell: pwsh
+
+  dependency-changes:
+    name: Dependency Change Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Check for Dependency Changes
+      run: |
+        echo "Checking for dependency changes..."
+        
+        dependency_files=(
+          "requirements.txt"
+          "CMakeLists.txt"
+        )
+        
+        changes_found=false
+        for file in "${dependency_files[@]}"; do
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^$file$"; then
+            echo "⚠ Dependency file modified: $file"
+            changes_found=true
+            
+            echo "Changes:"
+            git diff origin/${{ github.base_ref }}...HEAD -- "$file"
+          fi
+        done
+        
+        if [ "$changes_found" = true ]; then
+          echo ""
+          echo "⚠ Dependencies changed - ensure security review"
+        else
+          echo "✓ No dependency changes"
+        fi
+
+  security-critical-check:
+    name: Security Critical Code Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Check for Security-Critical Changes
+      run: |
+        echo "=== Security Critical Code Analysis ==="
+        
+        critical_files=(
+          "src/CertificateVerifier.cpp"
+          "src/SignatureScanner.cpp"
+          "kernel/AntiCheatKernelDriver.c"
+        )
+        
+        critical_modified=false
+        for file in "${critical_files[@]}"; do
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^$file$"; then
+            echo "⚠ Security-critical file modified: $file"
+            critical_modified=true
+            
+            echo "Checking for sensitive changes..."
+            
+            diff_output=$(git diff origin/${{ github.base_ref }}...HEAD -- "$file")
+            
+            if echo "$diff_output" | grep -q "memcpy\|strcpy\|malloc\|free"; then
+              echo "  → Memory operations modified - review carefully"
+            fi
+            
+            if echo "$diff_output" | grep -q "verify\|check\|validate"; then
+              echo "  → Verification logic modified - security review required"
+            fi
+          fi
+        done
+        
+        if [ "$critical_modified" = true ]; then
+          echo ""
+          echo "⚠ SECURITY REVIEW REQUIRED"
+          echo "Critical security components have been modified"
+        else
+          echo "✓ No security-critical files modified"
+        fi
+
+  commit-message-check:
+    name: Commit Message Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Validate Commit Messages
+      run: |
+        echo "Validating commit messages..."
+        
+        commits=$(git log --format=%H origin/${{ github.base_ref }}..HEAD)
+        
+        invalid_count=0
+        for commit in $commits; do
+          message=$(git log --format=%s -n 1 $commit)
+          
+          if [ ${#message} -lt 10 ]; then
+            echo "⚠ Commit too short: $message"
+            invalid_count=$((invalid_count + 1))
+          elif [ ${#message} -gt 100 ]; then
+            echo "⚠ Commit too long (>100 chars): ${message:0:50}..."
+            invalid_count=$((invalid_count + 1))
+          fi
+          
+          if echo "$message" | grep -qi "wip\|fixup\|temp\|tmp"; then
+            echo "⚠ Temporary commit message: $message"
+            echo "  → Consider squashing before merge"
+            invalid_count=$((invalid_count + 1))
+          fi
+        done
+        
+        if [ $invalid_count -gt 0 ]; then
+          echo ""
+          echo "⚠ $invalid_count commit(s) need attention"
+          echo "Consider improving commit messages"
+        else
+          echo "✓ All commit messages look good"
+        fi
+
+  code-coverage-comment:
+    name: Code Coverage Analysis
+    runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Add Coverage Comment
+      run: |
+        echo "Code coverage analysis would run here"
+        echo "Requires test suite implementation"
+      
+  anti-cheat-specific-checks:
+    name: Anti-Cheat Specific Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Check for Anti-Cheat Best Practices
+      run: |
+        echo "=== Anti-Cheat Specific Checks ==="
+        
+        echo "Checking for hardcoded signatures..."
+        if git diff origin/${{ github.base_ref }}...HEAD | grep -i "signature\|pattern\|0x[0-9a-f]\{8\}"; then
+          echo "⚠ Potential signature patterns in diff"
+          echo "  → Ensure signatures are not exposed in public repo"
+        fi
+        
+        echo ""
+        echo "Checking for timing attack vulnerabilities..."
+        changed_files=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+        
+        for file in $changed_files; do
+          if [ -f "$file" ] && [[ "$file" == *.cpp ]] || [[ "$file" == *.c ]]; then
+            if grep -q "strcmp\|memcmp" "$file"; then
+              echo "⚠ String comparison in $file"
+              echo "  → Use constant-time comparison for security checks"
+            fi
+          fi
+        done
+        
+        echo ""
+        echo "Checking for debug code..."
+        if git diff origin/${{ github.base_ref }}...HEAD | grep -i "debug\|printf\|cout\|DbgPrint"; then
+          echo "⚠ Debug code detected in diff"
+          echo "  → Remove before production release"
+        fi

@@ -1,0 +1,344 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  comprehensive-build:
+    name: Comprehensive Nightly Build
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Build Environment
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.20.x'
+        
+    - name: Build All Configurations
+      run: |
+        Write-Host "=== Building All Configurations ==="
+        
+        $configurations = @("Debug", "Release")
+        $results = @()
+        
+        foreach ($config in $configurations) {
+          Write-Host "`nBuilding $config configuration..."
+          
+          $buildDir = "build-$config"
+          cmake -B $buildDir -G "Visual Studio 17 2022" -A x64
+          
+          $start = Get-Date
+          cmake --build $buildDir --config $config
+          $end = Get-Date
+          
+          $duration = ($end - $start).TotalSeconds
+          
+          $exePath = "$buildDir\$config\anticheat-client.exe"
+          if (Test-Path $exePath) {
+            $size = (Get-Item $exePath).Length
+            $results += [PSCustomObject]@{
+              Configuration = $config
+              BuildTime = [math]::Round($duration, 2)
+              SizeMB = [math]::Round($size / 1MB, 2)
+              Status = "Success"
+            }
+          } else {
+            $results += [PSCustomObject]@{
+              Configuration = $config
+              BuildTime = [math]::Round($duration, 2)
+              SizeMB = 0
+              Status = "Failed"
+            }
+          }
+        }
+        
+        Write-Host "`n=== Build Summary ==="
+        $results | Format-Table -AutoSize
+      shell: pwsh
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Build Launcher
+      run: |
+        pip install -r requirements.txt
+        python build_launcher.py
+        
+    - name: Collect All Artifacts
+      run: |
+        New-Item -ItemType Directory -Force -Path nightly
+        
+        Copy-Item "build-Release\Release\anticheat-client.exe" "nightly\anticheat-client-release.exe" -ErrorAction SilentlyContinue
+        Copy-Item "build-Debug\Debug\anticheat-client.exe" "nightly\anticheat-client-debug.exe" -ErrorAction SilentlyContinue
+        Copy-Item "dist\AntiCheatLauncher.exe" "nightly\" -ErrorAction SilentlyContinue
+        
+        Get-ChildItem nightly | Format-Table Name, Length
+      shell: pwsh
+      
+    - name: Upload Nightly Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nightly-build-${{ github.run_number }}
+        path: nightly/
+        retention-days: 14
+
+  cross-platform-analysis:
+    name: Cross-Platform Analysis
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Analyze Code Portability
+      run: |
+        echo "=== Cross-Platform Code Analysis on ${{ matrix.os }} ==="
+        
+        echo "Checking for Windows-specific code..."
+        windows_specific=$(grep -r "windows.h\|winnt.h\|WIN32\|_WIN32" src kernel include | wc -l)
+        echo "Windows-specific references: $windows_specific"
+        
+        echo ""
+        echo "Checking for platform-specific types..."
+        grep -rn "DWORD\|HANDLE\|HWND\|HMODULE" src include || echo "None found"
+        
+        echo ""
+        echo "Note: This is a Windows-specific anti-cheat system"
+        echo "Analysis helps identify platform dependencies"
+
+  extensive-static-analysis:
+    name: Extensive Static Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Analysis Tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cppcheck clang-tidy iwyu
+        
+    - name: Run Comprehensive Cppcheck
+      run: |
+        echo "=== Comprehensive Cppcheck Analysis ==="
+        cppcheck --enable=all \
+          --inconclusive \
+          --std=c++20 \
+          --platform=win64 \
+          --suppress=missingIncludeSystem \
+          --xml \
+          --xml-version=2 \
+          -I include -I shared \
+          src kernel 2> cppcheck-full.xml
+          
+        cppcheck --enable=all \
+          --inconclusive \
+          --std=c++20 \
+          -I include -I shared \
+          src kernel 2>&1 | tee cppcheck-full.txt
+      continue-on-error: true
+      
+    - name: Upload Full Analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: nightly-static-analysis
+        path: |
+          cppcheck-full.xml
+          cppcheck-full.txt
+        retention-days: 30
+
+  security-deep-dive:
+    name: Deep Security Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Comprehensive Security Scan
+      run: |
+        echo "=== Comprehensive Security Analysis ==="
+        
+        echo "1. Searching for common vulnerabilities..."
+        
+        echo ""
+        echo "Buffer operations:"
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "memcpy\|strcpy\|strcat\|sprintf\|scanf" {} \; || echo "None found"
+        
+        echo ""
+        echo "Memory operations:"
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "malloc\|free\|new\|delete" {} \; || echo "None found"
+        
+        echo ""
+        echo "Pointer arithmetic:"
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "\+\+\s*\w*ptr\|\w*ptr\s*\+\+" {} \; || echo "None found"
+        
+        echo ""
+        echo "Integer operations on sizes:"
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "size.*[+\-*/].*size\|length.*[+\-*/]" {} \; || echo "None found"
+        
+        echo ""
+        echo "2. Checking authentication/authorization..."
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "verify\|validate\|authenticate\|authorize" {} \; || echo "None found"
+        
+        echo ""
+        echo "3. Checking cryptographic operations..."
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "crypt\|hash\|sign\|encrypt" {} \; || echo "None found"
+
+  build-statistics:
+    name: Build Statistics Collection
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Collect Build Statistics
+      run: |
+        Write-Host "=== Build Statistics ==="
+        
+        $stats = @{
+          Date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+          GitCommit = git rev-parse HEAD
+          GitBranch = git rev-parse --abbrev-ref HEAD
+        }
+        
+        $cppFiles = (Get-ChildItem -Path src,kernel -Include *.cpp,*.c -Recurse).Count
+        $headerFiles = (Get-ChildItem -Path include,shared -Include *.h,*.hpp -Recurse).Count
+        $totalLines = (Get-Content -Path (Get-ChildItem -Path src,kernel,include,shared -Include *.cpp,*.c,*.h,*.hpp -Recurse) | Measure-Object -Line).Lines
+        
+        $stats.CppFiles = $cppFiles
+        $stats.HeaderFiles = $headerFiles
+        $stats.TotalLines = $totalLines
+        
+        Write-Host "C++ source files: $cppFiles"
+        Write-Host "Header files: $headerFiles"
+        Write-Host "Total lines: $totalLines"
+        
+        $stats | ConvertTo-Json | Out-File "build-stats.json"
+      shell: pwsh
+      
+    - name: Upload Statistics
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-statistics
+        path: build-stats.json
+        retention-days: 90
+
+  anti-cheat-validation:
+    name: Anti-Cheat Validation Tests
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Validate Anti-Cheat Components
+      run: |
+        Write-Host "=== Anti-Cheat Component Validation ==="
+        
+        $exe = "build\Release\anticheat-client.exe"
+        
+        if (Test-Path $exe) {
+          Write-Host "✓ Client executable built"
+          
+          Write-Host "`nChecking for anti-debug protection..."
+          $content = [System.IO.File]::ReadAllBytes($exe)
+          Write-Host "Binary size: $($content.Length) bytes"
+          
+          Write-Host "`nVerifying no debug symbols in release..."
+          $pdbPath = "build\Release\anticheat-client.pdb"
+          if (Test-Path $pdbPath) {
+            Write-Host "⚠ PDB file found in release build"
+          } else {
+            Write-Host "✓ No PDB in release build"
+          }
+          
+          Write-Host "`nChecking binary properties..."
+          $versionInfo = (Get-Item $exe).VersionInfo
+          Write-Host "Company: $($versionInfo.CompanyName)"
+          Write-Host "Product: $($versionInfo.ProductName)"
+          Write-Host "Version: $($versionInfo.FileVersion)"
+        } else {
+          Write-Host "✗ Client executable not found"
+        }
+      shell: pwsh
+
+  documentation-generation:
+    name: Generate Documentation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Doxygen
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y doxygen graphviz
+        
+    - name: Generate Code Documentation
+      run: |
+        if [ ! -f "Doxyfile" ]; then
+          echo "Creating basic Doxyfile..."
+          doxygen -g
+          
+          sed -i 's/PROJECT_NAME           = "My Project"/PROJECT_NAME           = "Anti-Cheat System"/' Doxyfile
+          sed -i 's/INPUT                  =/INPUT                  = src kernel include shared/' Doxyfile
+          sed -i 's/RECURSIVE              = NO/RECURSIVE              = YES/' Doxyfile
+        fi
+        
+        doxygen
+      continue-on-error: true
+      
+    - name: Upload Documentation
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: code-documentation
+        path: html/
+        retention-days: 30
+
+  notification:
+    name: Build Notification
+    needs: [comprehensive-build, extensive-static-analysis, security-deep-dive]
+    runs-on: ubuntu-latest
+    if: failure()
+    
+    steps:
+    - name: Create Build Report
+      run: |
+        echo "=== Nightly Build Report ==="
+        echo "Date: $(date)"
+        echo "Status: FAILED"
+        echo ""
+        echo "One or more nightly build jobs failed."
+        echo "Please review the workflow run for details."
+        echo ""
+        echo "Failed jobs will be listed in the workflow summary."

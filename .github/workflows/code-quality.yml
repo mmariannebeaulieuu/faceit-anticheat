@@ -1,0 +1,253 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  cpp-format-check:
+    name: C++ Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install clang-format
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-format
+        
+    - name: Check C++ Formatting
+      run: |
+        echo "Checking C++ code formatting..."
+        find src kernel include -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) \
+          -exec clang-format --dry-run --Werror {} \; || {
+          echo "⚠ Formatting issues found. Run clang-format to fix."
+          echo "Suggested command: find src kernel include -type f \( -name '*.cpp' -o -name '*.c' -o -name '*.h' -o -name '*.hpp' \) -exec clang-format -i {} \;"
+          exit 1
+        }
+
+  cpp-lint:
+    name: C++ Lint (clang-tidy)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install clang-tidy
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang-tidy
+        
+    - name: Create compile_commands.json
+      run: |
+        echo '[' > compile_commands.json
+        for file in src/*.cpp; do
+          cat >> compile_commands.json << EOF
+        {
+          "directory": "$PWD",
+          "command": "g++ -std=c++20 -Iinclude -Ishared -c $file",
+          "file": "$file"
+        },
+        EOF
+        done
+        echo '{}]' >> compile_commands.json
+        
+    - name: Run clang-tidy
+      run: |
+        echo "Running clang-tidy on C++ files..."
+        find src -name "*.cpp" -exec clang-tidy {} -- -std=c++20 -Iinclude -Ishared \; || true
+      continue-on-error: true
+
+  python-quality:
+    name: Python Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install Python Tools
+      run: |
+        pip install flake8 black pylint mypy bandit
+        
+    - name: Run Black Format Check
+      run: |
+        echo "Checking Python code formatting..."
+        black --check --diff launcher.py build_launcher.py || {
+          echo "⚠ Python formatting issues found. Run 'black .' to fix."
+          exit 1
+        }
+      continue-on-error: true
+        
+    - name: Run Flake8
+      run: |
+        echo "Running Flake8 linter..."
+        flake8 launcher.py build_launcher.py --max-line-length=120 --statistics || true
+      continue-on-error: true
+        
+    - name: Run Pylint
+      run: |
+        echo "Running Pylint..."
+        pylint launcher.py build_launcher.py --max-line-length=120 --disable=C0114,C0115,C0116 || true
+      continue-on-error: true
+        
+    - name: Run MyPy Type Check
+      run: |
+        echo "Running MyPy type checker..."
+        mypy launcher.py build_launcher.py --ignore-missing-imports || true
+      continue-on-error: true
+        
+    - name: Run Bandit Security Lint
+      run: |
+        echo "Running Bandit security linter..."
+        bandit -r launcher.py build_launcher.py || true
+      continue-on-error: true
+
+  code-metrics:
+    name: Code Complexity Metrics
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Lizard
+      run: pip install lizard
+      
+    - name: Run Complexity Analysis
+      run: |
+        echo "=== Code Complexity Analysis ==="
+        lizard src kernel -l cpp -w || true
+        
+    - name: Check High Complexity Functions
+      run: |
+        echo "Checking for high complexity functions (CCN > 15)..."
+        lizard src kernel -l cpp -C 15 || {
+          echo "⚠ High complexity functions detected. Consider refactoring."
+          exit 0
+        }
+      continue-on-error: true
+
+  documentation-check:
+    name: Documentation Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check Documentation Files
+      run: |
+        echo "=== Documentation Check ==="
+        required_docs=(
+          "README.md"
+          "USAGE.md"
+        )
+        
+        missing=0
+        for doc in "${required_docs[@]}"; do
+          if [ ! -f "$doc" ]; then
+            echo "✗ Missing: $doc"
+            missing=1
+          else
+            echo "✓ Found: $doc"
+          fi
+        done
+        
+        exit $missing
+        
+    - name: Check for TODO Comments
+      run: |
+        echo "Scanning for TODO/FIXME comments..."
+        find src kernel include -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" -o -name "*.hpp" \) \
+          -exec grep -Hn "TODO\|FIXME\|XXX\|HACK" {} \; || echo "✓ No pending TODOs found"
+
+  msvc-warning-level:
+    name: MSVC Maximum Warnings
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build with /W4 /WX
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_CXX_FLAGS="/W4 /WX /permissive-"
+        cmake --build build --config Release
+      continue-on-error: true
+      
+    - name: Check Build Warnings
+      run: |
+        Write-Host "Build completed with maximum warning level"
+        Write-Host "Review any warnings in the build log"
+      shell: pwsh
+
+  kernel-best-practices:
+    name: Kernel Driver Best Practices
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check Kernel Code Patterns
+      run: |
+        echo "=== Kernel Driver Best Practices Check ==="
+        
+        driver_file="kernel/AntiCheatKernelDriver.c"
+        
+        if [ ! -f "$driver_file" ]; then
+          echo "✗ Kernel driver not found"
+          exit 1
+        fi
+        
+        echo "Checking for best practices..."
+        
+        checks=(
+          "DriverEntry:Driver entry point"
+          "DriverUnload:Proper unload handler"
+          "UNREFERENCED_PARAMETER:Unused parameter handling"
+          "IoCompleteRequest:IRP completion"
+          "STATUS_SUCCESS:Proper status codes"
+        )
+        
+        for check in "${checks[@]}"; do
+          pattern="${check%%:*}"
+          desc="${check##*:}"
+          if grep -q "$pattern" "$driver_file"; then
+            echo "✓ $desc: Found"
+          else
+            echo "⚠ $desc: Not found"
+          fi
+        done
+        
+        echo ""
+        echo "Checking for potential issues..."
+        
+        issues=(
+          "ExAllocatePoolWithTag:Memory allocation without tag"
+          "RtlCopyMemory.*ProbeForRead:Memory copy without validation"
+        )
+        
+        for issue in "${issues[@]}"; do
+          pattern="${issue%%:*}"
+          desc="${issue##*:}"
+          if grep -q "$pattern" "$driver_file"; then
+            echo "⚠ Potential issue - $desc"
+          fi
+        done

@@ -1,0 +1,352 @@
+name: Continuous Monitoring
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dependency-audit:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install Audit Tools
+      run: |
+        pip install safety pip-audit
+        
+    - name: Run Safety Check
+      id: safety
+      run: |
+        safety check --json > safety-report.json || true
+        
+        if [ -s safety-report.json ]; then
+          echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+        else
+          echo "vulnerabilities_found=false" >> $GITHUB_OUTPUT
+        fi
+      continue-on-error: true
+      
+    - name: Run pip-audit
+      run: |
+        pip-audit --desc > pip-audit-report.txt || true
+      continue-on-error: true
+      
+    - name: Upload Audit Reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-audit-reports
+        path: |
+          safety-report.json
+          pip-audit-report.txt
+        retention-days: 30
+        
+    - name: Create Issue for Vulnerabilities
+      if: steps.safety.outputs.vulnerabilities_found == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('safety-report.json', 'utf8');
+          
+          await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: '🔒 Security: Dependency vulnerabilities detected',
+            body: `Automated dependency audit found vulnerabilities.\n\nSee workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            labels: ['security', 'dependencies']
+          });
+
+  codebase-health:
+    name: Codebase Health Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Code Churn Analysis
+      run: |
+        echo "=== Code Churn Analysis (Last 30 Days) ==="
+        
+        git log --since="30 days ago" --pretty=format: --numstat | \
+          awk '{added+=$1; removed+=$2} END {print "Lines added:", added, "\nLines removed:", removed, "\nNet change:", added-removed}'
+        
+        echo ""
+        echo "Most changed files:"
+        git log --since="30 days ago" --pretty=format: --name-only | \
+          sort | uniq -c | sort -rn | head -10
+        
+    - name: TODO/FIXME Tracking
+      run: |
+        echo "=== TODO/FIXME Tracking ==="
+        
+        todo_count=$(find src kernel include -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -exec grep -h "TODO\|FIXME" {} \; | wc -l)
+        
+        echo "Total TODO/FIXME comments: $todo_count"
+        
+        if [ $todo_count -gt 0 ]; then
+          echo ""
+          echo "Details:"
+          find src kernel include -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -exec grep -Hn "TODO\|FIXME" {} \;
+        fi
+        
+    - name: Dead Code Detection
+      run: |
+        echo "=== Dead Code Detection ==="
+        
+        echo "Checking for unused functions..."
+        
+        for file in src/*.cpp; do
+          if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            echo "Analyzing: $filename"
+            
+            functions=$(grep -o "^[a-zA-Z_][a-zA-Z0-9_]*\s*(" "$file" | sed 's/($//' || true)
+            
+            if [ ! -z "$functions" ]; then
+              while IFS= read -r func; do
+                usage=$(grep -r "$func" src include --exclude="$filename" | wc -l)
+                if [ $usage -eq 0 ]; then
+                  echo "  ⚠ Potentially unused function: $func"
+                fi
+              done <<< "$functions"
+            fi
+          fi
+        done
+
+  binary-size-tracking:
+    name: Binary Size Tracking
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Track Binary Sizes
+      run: |
+        Write-Host "=== Binary Size Tracking ==="
+        
+        $binaries = @(
+          "build\Release\anticheat-client.exe"
+        )
+        
+        $results = @()
+        foreach ($binary in $binaries) {
+          if (Test-Path $binary) {
+            $size = (Get-Item $binary).Length
+            $sizeMB = [math]::Round($size / 1MB, 2)
+            $sizeKB = [math]::Round($size / 1KB, 2)
+            
+            $results += [PSCustomObject]@{
+              Binary = (Split-Path $binary -Leaf)
+              SizeMB = $sizeMB
+              SizeKB = $sizeKB
+              Bytes = $size
+            }
+          }
+        }
+        
+        $results | Format-Table -AutoSize
+        
+        $date = Get-Date -Format "yyyy-MM-dd"
+        $results | Export-Csv "binary-sizes-$date.csv" -NoTypeInformation
+        
+        Write-Host ""
+        Write-Host "Binary sizes logged to: binary-sizes-$date.csv"
+      shell: pwsh
+      
+    - name: Upload Size Tracking
+      uses: actions/upload-artifact@v4
+      with:
+        name: binary-size-tracking
+        path: binary-sizes-*.csv
+        retention-days: 90
+
+  compilation-time-tracking:
+    name: Build Time Tracking
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Track Build Time
+      run: |
+        $startTime = Get-Date
+        
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+        $endTime = Get-Date
+        $duration = $endTime - $startTime
+        
+        Write-Host "=== Build Time Tracking ==="
+        Write-Host "Start: $startTime"
+        Write-Host "End: $endTime"
+        Write-Host "Duration: $($duration.TotalSeconds) seconds"
+        Write-Host ""
+        
+        $result = [PSCustomObject]@{
+          Date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+          DurationSeconds = [math]::Round($duration.TotalSeconds, 2)
+          DurationMinutes = [math]::Round($duration.TotalMinutes, 2)
+        }
+        
+        $result | Format-Table -AutoSize
+        $result | Export-Csv "build-time.csv" -NoTypeInformation
+      shell: pwsh
+      
+    - name: Upload Build Time
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-time-tracking
+        path: build-time.csv
+        retention-days: 90
+
+  license-compliance-monitor:
+    name: License Compliance Monitoring
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check License Headers
+      run: |
+        echo "=== License Compliance Check ==="
+        
+        missing_license=()
+        
+        while IFS= read -r file; do
+          if ! head -n 20 "$file" | grep -qi "license\|copyright"; then
+            missing_license+=("$file")
+          fi
+        done < <(find src kernel include -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \))
+        
+        if [ ${#missing_license[@]} -gt 0 ]; then
+          echo "⚠ Files missing license headers:"
+          printf '%s\n' "${missing_license[@]}"
+          echo ""
+          echo "Total: ${#missing_license[@]} files"
+        else
+          echo "✓ All source files have license headers"
+        fi
+
+  security-baseline:
+    name: Security Baseline Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Security Configuration Baseline
+      run: |
+        echo "=== Security Configuration Baseline ==="
+        
+        echo "Checking CMake security flags..."
+        if grep -q "/W4\|/WX\|/sdl\|/guard:cf" CMakeLists.txt; then
+          echo "✓ Security compilation flags present"
+        else
+          echo "⚠ Consider adding security compilation flags"
+        fi
+        
+        echo ""
+        echo "Checking for secure coding patterns..."
+        
+        secure_patterns=(
+          "memset_s:Secure memory zeroing"
+          "SecureZeroMemory:Windows secure zeroing"
+          "_s functions:Bounds-checked functions"
+        )
+        
+        for pattern_pair in "${secure_patterns[@]}"; do
+          pattern="${pattern_pair%%:*}"
+          desc="${pattern_pair##*:}"
+          
+          count=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -h "$pattern" {} \; | wc -l)
+          
+          if [ $count -gt 0 ]; then
+            echo "✓ $desc: Found $count instances"
+          fi
+        done
+
+  documentation-drift:
+    name: Documentation Drift Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Check Documentation Updates
+      run: |
+        echo "=== Documentation Drift Check ==="
+        
+        last_code_change=$(git log -1 --format=%ct -- src/ kernel/)
+        last_doc_change=$(git log -1 --format=%ct -- README.md USAGE.md)
+        
+        if [ -z "$last_doc_change" ]; then
+          echo "⚠ Documentation has never been updated"
+        elif [ $last_code_change -gt $last_doc_change ]; then
+          days_diff=$(( ($last_code_change - $last_doc_change) / 86400 ))
+          echo "⚠ Documentation is $days_diff days behind code changes"
+          echo "  Last code change: $(date -d @$last_code_change)"
+          echo "  Last doc change: $(date -d @$last_doc_change)"
+        else
+          echo "✓ Documentation is up to date"
+        fi
+
+  test-coverage-reminder:
+    name: Test Coverage Reminder
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for Tests
+      run: |
+        echo "=== Test Coverage Status ==="
+        
+        if [ -d "tests" ] || [ -d "test" ]; then
+          test_count=$(find tests test -name "*.cpp" -o -name "*.c" 2>/dev/null | wc -l)
+          echo "Test files found: $test_count"
+        else
+          echo "⚠ No test directory found"
+          echo ""
+          echo "Recommendations:"
+          echo "• Add unit tests for critical components"
+          echo "• Test memory safety features"
+          echo "• Test kernel driver IOCTLs"
+          echo "• Add integration tests"
+          echo "• Consider fuzzing for security"
+        fi
