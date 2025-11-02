@@ -32,6 +32,22 @@ CMakeCache.txt
 # Runtime logs
 logs/
 
+# PyInstaller artifacts
+/dist/
+/build_launcher/
+*.spec
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Launcher runtime directory
+/anticheat_files/
+
+# Python virtual environment
+venv/
+env/
+.venv/
+
 # OS-specific
 Thumbs.db
 .DS_Store
