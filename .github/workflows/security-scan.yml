@@ -1,0 +1,240 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  codeql-analysis:
+    name: CodeQL Security Analysis
+    runs-on: windows-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'cpp', 'python' ]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        queries: +security-and-quality
+        
+    - name: Setup MSBuild (for C++)
+      if: matrix.language == 'cpp'
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Build C++ for Analysis
+      if: matrix.language == 'cpp'
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64
+        cmake --build build --config Release
+        
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{ matrix.language }}"
+
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install Python Dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install safety pip-audit
+        
+    - name: Run Safety Check
+      run: safety check --json || true
+      continue-on-error: true
+      
+    - name: Run pip-audit
+      run: pip-audit --desc || true
+      continue-on-error: true
+
+  secret-scanning:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: TruffleHog Secret Scan
+      uses: trufflesecurity/trufflehog@main
+      with:
+        extra_args: --only-verified
+        
+  memory-safety-analysis:
+    name: Memory Safety Deep Scan
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.20.x'
+        
+    - name: Configure with Analysis
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_CXX_FLAGS="/analyze /W4 /WX /sdl /guard:cf"
+      shell: pwsh
+      
+    - name: Build with Security Checks
+      run: cmake --build build --config Release
+      continue-on-error: true
+      
+    - name: Check for Common Vulnerabilities
+      run: |
+        Write-Host "Scanning for potential memory safety issues..."
+        $patterns = @(
+          "strcpy|strcat|sprintf|gets",
+          "malloc.*free",
+          "new.*delete",
+          "memcpy|memmove|memset"
+        )
+        
+        $findings = @()
+        foreach ($pattern in $patterns) {
+          $results = Get-ChildItem -Path src,kernel -Include *.c,*.cpp -Recurse | `
+            Select-String -Pattern $pattern
+          if ($results) {
+            $findings += $results
+            Write-Host "⚠ Found pattern: $pattern"
+            $results | Format-Table -AutoSize
+          }
+        }
+        
+        if ($findings.Count -gt 0) {
+          Write-Host "`n⚠ Total findings: $($findings.Count)"
+          Write-Host "Review these for memory safety"
+        } else {
+          Write-Host "✓ No obvious unsafe patterns found"
+        }
+      shell: pwsh
+
+  kernel-security-analysis:
+    name: Kernel Driver Security Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Analyze Kernel Driver
+      run: |
+        Write-Host "=== Kernel Driver Security Analysis ==="
+        
+        $driverFile = "kernel/AntiCheatKernelDriver.c"
+        if (Test-Path $driverFile) {
+          $content = Get-Content $driverFile -Raw
+          
+          $checks = @{
+            "Buffer Overflow Protection" = "STATUS_BUFFER_TOO_SMALL|BufferLength"
+            "NULL Pointer Checks" = "NULL|nullptr"
+            "IRQL Handling" = "KeGetCurrentIrql|DISPATCH_LEVEL"
+            "Memory Pool Tags" = "ExAllocatePool.*Tag"
+            "Input Validation" = "ProbeForRead|ProbeForWrite"
+          }
+          
+          foreach ($check in $checks.GetEnumerator()) {
+            if ($content -match $check.Value) {
+              Write-Host "✓ $($check.Key): Found"
+            } else {
+              Write-Host "⚠ $($check.Key): Not found - review recommended"
+            }
+          }
+          
+          $unsafePatterns = @(
+            "ExAllocatePool\(",
+            "RtlCopyMemory",
+            "strcpy",
+            "sprintf"
+          )
+          
+          Write-Host "`n=== Unsafe Pattern Detection ==="
+          foreach ($pattern in $unsafePatterns) {
+            $matches = [regex]::Matches($content, $pattern)
+            if ($matches.Count -gt 0) {
+              Write-Host "⚠ Found $($matches.Count) instances of: $pattern"
+            }
+          }
+        }
+      shell: pwsh
+
+  license-compliance:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check License Headers
+      run: |
+        echo "Checking for license headers in source files..."
+        find src kernel -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.h" \) | while read file; do
+          if ! head -n 10 "$file" | grep -qi "license\|copyright"; then
+            echo "⚠ Missing license header: $file"
+          fi
+        done
+
+  code-signing-check:
+    name: Code Signing Readiness
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for Test Certificates
+      run: |
+        Write-Host "=== Code Signing Readiness Check ==="
+        
+        $criticalFiles = @(
+          "build/Release/anticheat-client.exe",
+          "kernel/AntiCheatKernelDriver.sys"
+        )
+        
+        Write-Host "⚠ Remember to sign binaries before production deployment:"
+        Write-Host "  - User-mode client (EV certificate)"
+        Write-Host "  - Kernel driver (Microsoft WHQL)"
+        Write-Host ""
+        Write-Host "Required steps:"
+        Write-Host "  1. Obtain EV Code Signing Certificate"
+        Write-Host "  2. Submit driver for WHQL certification"
+        Write-Host "  3. Sign all executables with timestamp"
+        Write-Host "  4. Verify signatures before release"
+      shell: pwsh

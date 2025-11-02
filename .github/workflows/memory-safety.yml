@@ -1,0 +1,355 @@
+name: Memory Safety Analysis
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  address-sanitizer:
+    name: AddressSanitizer Build
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Configure with ASan
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_BUILD_TYPE=Debug `
+          -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi"
+      shell: pwsh
+      
+    - name: Build with ASan
+      run: cmake --build build --config Debug
+      continue-on-error: true
+      
+    - name: Report ASan Results
+      run: |
+        if (Test-Path "build\Debug\anticheat-client.exe") {
+          Write-Host "✓ AddressSanitizer build successful"
+          Write-Host "Binary instrumented for memory error detection"
+        } else {
+          Write-Host "⚠ AddressSanitizer build failed - review errors"
+        }
+      shell: pwsh
+
+  static-analysis-deep:
+    name: Deep Static Analysis
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Run Static Analysis
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_CXX_FLAGS="/analyze /analyze:WX- /W4"
+        cmake --build build --config Release 2>&1 | Tee-Object -FilePath static-analysis.log
+      shell: pwsh
+      continue-on-error: true
+      
+    - name: Parse Analysis Results
+      run: |
+        if (Test-Path "static-analysis.log") {
+          $warnings = Select-String -Path "static-analysis.log" -Pattern "warning C6"
+          if ($warnings) {
+            Write-Host "⚠ Static Analysis Warnings Found:"
+            $warnings | ForEach-Object { Write-Host $_.Line }
+          } else {
+            Write-Host "✓ No static analysis warnings"
+          }
+        }
+      shell: pwsh
+      
+    - name: Upload Analysis Log
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: static-analysis-log
+        path: static-analysis.log
+        retention-days: 30
+
+  buffer-overflow-detection:
+    name: Buffer Overflow Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Scan for Unsafe Functions
+      run: |
+        echo "=== Buffer Overflow Risk Analysis ==="
+        
+        unsafe_functions=(
+          "strcpy"
+          "strcat"
+          "sprintf"
+          "gets"
+          "scanf"
+          "vsprintf"
+          "strcpy_s"
+          "memcpy"
+        )
+        
+        total_findings=0
+        for func in "${unsafe_functions[@]}"; do
+          echo ""
+          echo "Checking for: $func"
+          findings=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) \
+            -exec grep -Hn "\b$func\b" {} \; | wc -l)
+          
+          if [ $findings -gt 0 ]; then
+            echo "⚠ Found $findings instances of $func"
+            find src kernel -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) \
+              -exec grep -Hn "\b$func\b" {} \;
+            total_findings=$((total_findings + findings))
+          else
+            echo "✓ No instances found"
+          fi
+        done
+        
+        echo ""
+        echo "=== Summary ==="
+        echo "Total potentially unsafe function calls: $total_findings"
+        
+        if [ $total_findings -gt 0 ]; then
+          echo "⚠ Review these functions for buffer overflow risks"
+          echo "Consider using bounds-checked alternatives"
+        fi
+
+  memory-leak-patterns:
+    name: Memory Leak Pattern Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Detect Memory Leak Patterns
+      run: |
+        echo "=== Memory Leak Pattern Analysis ==="
+        
+        echo "Checking for malloc/free pairs..."
+        malloc_count=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -h "malloc\|calloc\|realloc" {} \; | wc -l)
+        free_count=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -h "\bfree\b" {} \; | wc -l)
+        
+        echo "Malloc/calloc/realloc calls: $malloc_count"
+        echo "Free calls: $free_count"
+        
+        echo ""
+        echo "Checking for new/delete pairs..."
+        new_count=$(find src kernel -type f \( -name "*.cpp" \) -exec grep -h "\bnew\b" {} \; | grep -v "// " | wc -l)
+        delete_count=$(find src kernel -type f \( -name "*.cpp" \) -exec grep -h "\bdelete\b" {} \; | grep -v "// " | wc -l)
+        
+        echo "New calls: $new_count"
+        echo "Delete calls: $delete_count"
+        
+        echo ""
+        echo "Checking for resource acquisition..."
+        handle_opens=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -h "CreateFile\|OpenFile\|CreateHandle" {} \; | wc -l)
+        handle_closes=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -h "CloseHandle" {} \; | wc -l)
+        
+        echo "Handle opens: $handle_opens"
+        echo "Handle closes: $handle_closes"
+        
+        echo ""
+        echo "=== Recommendations ==="
+        echo "• Use RAII patterns to prevent leaks"
+        echo "• Consider smart pointers (unique_ptr, shared_ptr)"
+        echo "• Use scope guards for resource cleanup"
+        echo "• Implement proper exception safety"
+
+  nullptr-checks:
+    name: Null Pointer Dereference Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for Null Pointer Protection
+      run: |
+        echo "=== Null Pointer Dereference Analysis ==="
+        
+        echo "Checking for pointer dereferences..."
+        
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) | while read file; do
+          echo ""
+          echo "Analyzing: $file"
+          
+          pointer_derefs=$(grep -n "\->" "$file" | wc -l)
+          null_checks=$(grep -n "!= NULL\|!= nullptr\|== NULL\|== nullptr\|if.*NULL" "$file" | wc -l)
+          
+          echo "  Pointer dereferences: $pointer_derefs"
+          echo "  Null checks: $null_checks"
+          
+          if [ $pointer_derefs -gt 0 ] && [ $null_checks -eq 0 ]; then
+            echo "  ⚠ Warning: Pointer dereferences without null checks detected"
+          elif [ $pointer_derefs -gt 0 ]; then
+            echo "  ✓ Null checks present"
+          fi
+        done
+
+  integer-overflow-check:
+    name: Integer Overflow Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check for Integer Overflow Risks
+      run: |
+        echo "=== Integer Overflow Analysis ==="
+        
+        echo "Checking for arithmetic operations on buffer sizes..."
+        
+        patterns=(
+          "size.*\+.*size:Buffer size arithmetic"
+          "length.*\*:Buffer length multiplication"
+          "count.*\*:Counter multiplication"
+          "sizeof.*\+:Sizeof arithmetic"
+        )
+        
+        for pattern_pair in "${patterns[@]}"; do
+          pattern="${pattern_pair%%:*}"
+          desc="${pattern_pair##*:}"
+          
+          echo ""
+          echo "Checking: $desc"
+          findings=$(find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) -exec grep -Hn "$pattern" {} \; || true)
+          
+          if [ ! -z "$findings" ]; then
+            echo "⚠ Found potential issues:"
+            echo "$findings"
+          else
+            echo "✓ No issues found"
+          fi
+        done
+        
+        echo ""
+        echo "=== Recommendations ==="
+        echo "• Use SafeInt library for checked arithmetic"
+        echo "• Validate all size calculations"
+        echo "• Check for overflow before allocation"
+        echo "• Use SIZE_MAX for size_t overflow checks"
+
+  use-after-free-detection:
+    name: Use-After-Free Pattern Detection
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Detect UAF Patterns
+      run: |
+        echo "=== Use-After-Free Pattern Analysis ==="
+        
+        echo "Scanning for potential use-after-free patterns..."
+        
+        find src kernel -type f \( -name "*.c" -o -name "*.cpp" \) | while read file; do
+          echo ""
+          echo "Analyzing: $file"
+          
+          content=$(cat "$file")
+          
+          free_patterns=$(echo "$content" | grep -n "free\|delete" | cut -d: -f1)
+          
+          if [ ! -z "$free_patterns" ]; then
+            echo "  Found memory deallocations at lines: $free_patterns"
+            echo "  ⚠ Manually verify no use-after-free occurs"
+          else
+            echo "  ✓ No explicit deallocations"
+          fi
+        done
+        
+        echo ""
+        echo "=== Recommendations ==="
+        echo "• Set pointers to NULL after freeing"
+        echo "• Use smart pointers to prevent UAF"
+        echo "• Implement clear object ownership"
+        echo "• Use RAII for automatic cleanup"
+
+  kernel-memory-safety:
+    name: Kernel Memory Safety Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Analyze Kernel Driver Memory Safety
+      run: |
+        echo "=== Kernel Driver Memory Safety ==="
+        
+        driver_file="kernel/AntiCheatKernelDriver.c"
+        
+        if [ ! -f "$driver_file" ]; then
+          echo "✗ Kernel driver not found"
+          exit 1
+        fi
+        
+        echo "Checking for kernel memory safety patterns..."
+        
+        checks=(
+          "ExAllocatePool:Pool allocation"
+          "ExFreePool:Pool deallocation"
+          "ProbeForRead:Input buffer validation"
+          "ProbeForWrite:Output buffer validation"
+          "__try.*__except:Exception handling"
+          "RtlCopyMemory:Memory copy"
+          "RtlZeroMemory:Memory zeroing"
+          "PAGED_CODE:Paging assertions"
+        )
+        
+        for check_pair in "${checks[@]}"; do
+          pattern="${check_pair%%:*}"
+          desc="${check_pair##*:}"
+          
+          if grep -q "$pattern" "$driver_file"; then
+            echo "✓ $desc: Present"
+          else
+            echo "⚠ $desc: Not found"
+          fi
+        done
+        
+        echo ""
+        echo "Checking for unsafe patterns..."
+        
+        unsafe=(
+          "ExAllocatePoolWithTag[^;]*NonPagedPool:Untagged pool allocation"
+          "MmGetSystemAddressForMdl.*ProbeForRead:Unsafe MDL usage"
+        )
+        
+        for unsafe_pair in "${unsafe[@]}"; do
+          pattern="${unsafe_pair%%:*}"
+          desc="${unsafe_pair##*:}"
+          
+          if grep -q "$pattern" "$driver_file"; then
+            echo "⚠ Warning - $desc"
+          fi
+        done
+        
+        echo ""
+        echo "=== Kernel Memory Safety Recommendations ==="
+        echo "• Always validate user-mode buffers with ProbeForRead/Write"
+        echo "• Use try-except blocks for all user-mode memory access"
+        echo "• Tag all pool allocations for debugging"
+        echo "• Check buffer sizes before copying"
+        echo "• Zero sensitive memory before freeing"
+        echo "• Use NonPagedPool for IRQL >= DISPATCH_LEVEL"

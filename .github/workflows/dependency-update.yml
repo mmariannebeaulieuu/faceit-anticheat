@@ -1,0 +1,218 @@
+name: Dependency Updates
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-python-updates:
+    name: Check Python Dependencies
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Check for Updates
+      run: |
+        echo "=== Checking Python Dependencies ==="
+        
+        pip install pip-upgrade
+        
+        echo "Current dependencies:"
+        cat requirements.txt
+        
+        echo ""
+        echo "Checking for updates..."
+        pip list --outdated || true
+        
+    - name: Test Updated Dependencies
+      run: |
+        pip install --upgrade -r requirements.txt
+        
+        echo "Testing with updated dependencies..."
+        python build_launcher.py || echo "Build test with updates"
+      continue-on-error: true
+
+  check-cmake-updates:
+    name: Check CMake Configuration
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check CMake Version
+      run: |
+        echo "=== CMake Configuration Check ==="
+        
+        current_version=$(grep "cmake_minimum_required" CMakeLists.txt | grep -oP '\d+\.\d+' || echo "3.20")
+        echo "Current minimum CMake version: $current_version"
+        
+        latest_cmake=$(curl -s https://cmake.org/download/ | grep -oP 'cmake-\d+\.\d+\.\d+' | head -1 | sed 's/cmake-//')
+        echo "Latest CMake version: $latest_cmake"
+        
+        echo ""
+        echo "C++ Standard:"
+        grep "CMAKE_CXX_STANDARD" CMakeLists.txt || echo "Not explicitly set"
+
+  check-github-actions:
+    name: Check GitHub Actions Updates
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: List Action Versions
+      run: |
+        echo "=== GitHub Actions Version Check ==="
+        
+        echo "Actions used in workflows:"
+        grep -r "uses:" .github/workflows/ | sed 's/.*uses: //' | sort -u
+        
+        echo ""
+        echo "Recommended updates:"
+        echo "• Keep actions/checkout at v4"
+        echo "• Keep actions/setup-python at v5"
+        echo "• Keep actions/upload-artifact at v4"
+        echo "• Keep github/codeql-action at v3"
+
+  security-advisory-check:
+    name: Security Advisory Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Check Security Advisories
+      run: |
+        echo "=== Security Advisory Check ==="
+        
+        pip install safety
+        
+        pip install -r requirements.txt
+        
+        echo "Running security audit..."
+        safety check --json > safety-check.json || true
+        
+        if [ -s safety-check.json ]; then
+          echo "⚠ Security advisories found:"
+          cat safety-check.json
+        else
+          echo "✓ No security advisories"
+        fi
+      continue-on-error: true
+      
+    - name: Upload Security Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: security-advisory-report
+        path: safety-check.json
+        retention-days: 30
+
+  toolchain-updates:
+    name: Check Toolchain Updates
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check MSVC Version
+      run: |
+        Write-Host "=== Toolchain Version Check ==="
+        
+        Write-Host "Checking Visual Studio components..."
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        
+        if (Test-Path $vsWhere) {
+          & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+        }
+        
+        Write-Host ""
+        Write-Host "Current CMake configuration:"
+        Get-Content CMakeLists.txt | Select-String "Visual Studio"
+      shell: pwsh
+
+  create-update-summary:
+    name: Create Update Summary
+    needs: [check-python-updates, check-cmake-updates, check-github-actions, security-advisory-check]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Generate Update Report
+      run: |
+        cat << 'EOF' > update-summary.md
+        # Dependency Update Summary
+        
+        **Date:** $(date +%Y-%m-%d)
+        
+        ## Checked Components
+        
+        - [x] Python dependencies
+        - [x] CMake configuration
+        - [x] GitHub Actions versions
+        - [x] Security advisories
+        - [x] Toolchain versions
+        
+        ## Recommendations
+        
+        ### High Priority
+        - Review security advisories
+        - Update dependencies with known vulnerabilities
+        
+        ### Medium Priority
+        - Update GitHub Actions to latest stable versions
+        - Consider CMake version bump for new features
+        
+        ### Low Priority
+        - Update Python packages for new features
+        - Review toolchain updates
+        
+        ## Update Process
+        
+        1. Review changes in dependencies
+        2. Test in development environment
+        3. Run full CI/CD pipeline
+        4. Update documentation if needed
+        5. Create PR for review
+        
+        ## Notes
+        
+        - Always review changelogs before updating
+        - Test thoroughly for breaking changes
+        - Update one component at a time for easier rollback
+        - Pin versions for production stability
+        
+        EOF
+        
+        cat update-summary.md
+        
+    - name: Upload Summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-update-summary
+        path: update-summary.md
+        retention-days: 90

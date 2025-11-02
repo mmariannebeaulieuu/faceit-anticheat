@@ -1,0 +1,328 @@
+name: Release Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  validate-release:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Validate Tag Format
+      run: |
+        if [ "${{ github.event_name }}" = "push" ]; then
+          TAG="${{ github.ref_name }}"
+        else
+          TAG="${{ inputs.version }}"
+        fi
+        
+        echo "Validating tag: $TAG"
+        
+        if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "✗ Invalid tag format: $TAG"
+          echo "Expected format: v1.0.0"
+          exit 1
+        fi
+        
+        echo "✓ Tag format valid: $TAG"
+        
+    - name: Check Changelog
+      run: |
+        if [ ! -f "CHANGES.md" ]; then
+          echo "⚠ No CHANGES.md file found"
+          echo "Consider adding a changelog"
+        else
+          echo "✓ Changelog present"
+        fi
+
+  build-release:
+    name: Build Release Binaries
+    needs: validate-release
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.20.x'
+        
+    - name: Build Client (Release)
+      run: |
+        cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release --verbose
+        
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Build Launcher
+      run: python build_launcher.py
+      
+    - name: Generate Checksums
+      run: |
+        $files = @(
+          "build\Release\anticheat-client.exe",
+          "dist\AntiCheatLauncher.exe"
+        )
+        
+        $checksums = @()
+        foreach ($file in $files) {
+          if (Test-Path $file) {
+            $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash
+            $name = Split-Path $file -Leaf
+            $checksums += "$hash  $name"
+            Write-Host "$name : $hash"
+          }
+        }
+        
+        $checksums | Out-File -FilePath "SHA256SUMS.txt" -Encoding ASCII
+        Write-Host "`nChecksum file created: SHA256SUMS.txt"
+      shell: pwsh
+      
+    - name: Create Release Package
+      run: |
+        New-Item -ItemType Directory -Force -Path release
+        
+        Copy-Item "build\Release\anticheat-client.exe" "release\"
+        Copy-Item "dist\AntiCheatLauncher.exe" "release\"
+        Copy-Item "release-config.json" "release\"
+        Copy-Item "SHA256SUMS.txt" "release\"
+        Copy-Item "README.md" "release\"
+        Copy-Item "USAGE.md" "release\"
+        
+        Compress-Archive -Path "release\*" -DestinationPath "anticheat-release.zip"
+        
+        Write-Host "`nRelease package created: anticheat-release.zip"
+        Get-Item "anticheat-release.zip" | Select-Object Name, Length
+      shell: pwsh
+      
+    - name: Upload Release Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-binaries
+        path: |
+          release/
+          anticheat-release.zip
+          SHA256SUMS.txt
+        retention-days: 90
+
+  security-final-check:
+    name: Final Security Check
+    needs: validate-release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Scan for Secrets
+      run: |
+        echo "Scanning for secrets in release..."
+        
+        patterns=(
+          "password"
+          "api[_-]?key"
+          "secret"
+          "token"
+          "private[_-]?key"
+        )
+        
+        found=false
+        for pattern in "${patterns[@]}"; do
+          if git grep -i "$pattern" | grep -v ".github\|README\|USAGE"; then
+            echo "⚠ Potential secret found: $pattern"
+            found=true
+          fi
+        done
+        
+        if [ "$found" = true ]; then
+          echo ""
+          echo "⚠ Review findings before release"
+        else
+          echo "✓ No secrets detected"
+        fi
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: [validate-release, build-release, security-final-check]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: release-binaries
+        path: release-artifacts/
+        
+    - name: Extract Changelog
+      id: changelog
+      run: |
+        if [ -f "CHANGES.md" ]; then
+          VERSION="${{ github.ref_name }}"
+          echo "Extracting changelog for $VERSION"
+          
+          sed -n "/## $VERSION/,/## /p" CHANGES.md | sed '$ d' > release-notes.md
+          
+          if [ -s release-notes.md ]; then
+            echo "✓ Changelog extracted"
+          else
+            echo "⚠ No changelog for this version, using default"
+            echo "Release $VERSION" > release-notes.md
+          fi
+        else
+          echo "Release ${{ github.ref_name }}" > release-notes.md
+        fi
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ github.ref_name }}
+        body_path: release-notes.md
+        draft: false
+        prerelease: false
+        files: |
+          release-artifacts/anticheat-release.zip
+          release-artifacts/SHA256SUMS.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sign-binaries:
+    name: Code Signing Preparation
+    needs: build-release
+    runs-on: windows-latest
+    
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: release-binaries
+        path: unsigned-binaries/
+        
+    - name: Code Signing Instructions
+      run: |
+        Write-Host "=== CODE SIGNING REQUIRED ===" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Before deploying to production, sign these binaries:"
+        Write-Host ""
+        Write-Host "1. User-Mode Client (anticheat-client.exe)"
+        Write-Host "   - Requires: EV Code Signing Certificate"
+        Write-Host "   - Tool: signtool.exe"
+        Write-Host "   - Command: signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /v anticheat-client.exe"
+        Write-Host ""
+        Write-Host "2. Launcher (AntiCheatLauncher.exe)"
+        Write-Host "   - Requires: EV Code Signing Certificate"
+        Write-Host "   - Same signing process as client"
+        Write-Host ""
+        Write-Host "3. Kernel Driver (AntiCheatKernelDriver.sys)"
+        Write-Host "   - Requires: Microsoft WHQL Certification"
+        Write-Host "   - Process: Submit to Windows Hardware Dev Center"
+        Write-Host "   - Testing: Windows HLK (Hardware Lab Kit)"
+        Write-Host ""
+        Write-Host "⚠ DO NOT deploy unsigned binaries to production!" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Documentation: https://docs.microsoft.com/en-us/windows-hardware/drivers/dashboard/"
+      shell: pwsh
+
+  deployment-checklist:
+    name: Deployment Checklist
+    needs: [build-release, security-final-check]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Generate Deployment Checklist
+      run: |
+        cat << 'EOF' > deployment-checklist.md
+        # Production Deployment Checklist
+        
+        ## Pre-Deployment
+        - [ ] All tests passing
+        - [ ] Security scans completed
+        - [ ] Code review approved
+        - [ ] Changelog updated
+        - [ ] Version numbers updated
+        
+        ## Code Signing
+        - [ ] User-mode client signed with EV certificate
+        - [ ] Launcher signed with EV certificate
+        - [ ] Kernel driver WHQL certified
+        - [ ] All signatures timestamped
+        - [ ] Signature verification tested
+        
+        ## Security
+        - [ ] No secrets in binaries
+        - [ ] No debug code in release
+        - [ ] Memory safety verified
+        - [ ] Input validation reviewed
+        - [ ] Attack surface minimized
+        
+        ## Testing
+        - [ ] Functional testing completed
+        - [ ] Performance testing done
+        - [ ] Compatibility testing (Windows versions)
+        - [ ] Anti-tamper mechanisms tested
+        - [ ] False positive rate acceptable
+        
+        ## Infrastructure
+        - [ ] CDN configured for downloads
+        - [ ] Update servers ready
+        - [ ] Monitoring and alerting set up
+        - [ ] Rollback plan prepared
+        - [ ] Rate limiting configured
+        
+        ## Documentation
+        - [ ] User documentation updated
+        - [ ] API documentation current
+        - [ ] Incident response plan ready
+        - [ ] Support team trained
+        
+        ## Compliance
+        - [ ] Privacy policy reviewed
+        - [ ] GDPR compliance verified
+        - [ ] Terms of service updated
+        - [ ] License compliance checked
+        
+        ## Post-Deployment
+        - [ ] Monitor error rates
+        - [ ] Check performance metrics
+        - [ ] Review user feedback
+        - [ ] Update telemetry
+        
+        EOF
+        
+        cat deployment-checklist.md
+        
+    - name: Upload Checklist
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-checklist
+        path: deployment-checklist.md
+        retention-days: 90
